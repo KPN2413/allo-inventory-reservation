@@ -1,14 +1,22 @@
 export interface Warehouse {
   id: string
   name: string
+  code?: string
+  city?: string
   location: string
 }
 
 export interface WarehouseStock {
   warehouseId: string
   warehouseName: string
+  warehouseCode?: string
+  warehouseCity?: string
   warehouseLocation: string
+  totalUnits?: number
+  reservedUnits?: number
+  availableUnits: number
   availableQty: number
+  warehouse?: Warehouse
 }
 
 export interface Product {
@@ -32,7 +40,12 @@ export interface Reservation {
   quantity: number
   status: ReservationStatus
   expiresAt: string // ISO string
+  confirmedAt?: string
+  releasedAt?: string
   createdAt: string
+  updatedAt?: string
+  product?: Pick<Product, "id" | "name" | "sku" | "description">
+  warehouse?: Warehouse
 }
 
 export interface ApiError {

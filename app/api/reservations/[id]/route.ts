@@ -1,25 +1,34 @@
 import { NextResponse } from "next/server"
-import { reservations } from "@/lib/mock-store"
+import { serializeReservation } from "@/lib/api-serializers"
+import { prisma } from "@/lib/prisma"
+import { releaseExpiredReservations } from "@/lib/reservation-expiry"
+
+export const runtime = "nodejs"
+
+const reservationInclude = {
+  product: true,
+  warehouse: true,
+}
 
 export async function GET(
   _request: Request,
-  { params }: { params: Promise<{ id: string }> }
+  { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params
-  const reservation = reservations.get(id)
+
+  await releaseExpiredReservations()
+
+  const reservation = await prisma.reservation.findUnique({
+    where: { id },
+    include: reservationInclude,
+  })
 
   if (!reservation) {
-    return NextResponse.json({ message: "Reservation not found." }, { status: 404 })
+    return NextResponse.json(
+      { error: "RESERVATION_NOT_FOUND", message: "Reservation not found" },
+      { status: 404 },
+    )
   }
 
-  // Auto-expire
-  if (
-    reservation.status === "pending" &&
-    new Date() > new Date(reservation.expiresAt)
-  ) {
-    reservation.status = "expired"
-    reservations.set(id, reservation)
-  }
-
-  return NextResponse.json(reservation)
+  return NextResponse.json(serializeReservation(reservation))
 }

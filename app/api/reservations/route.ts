@@ -1,60 +1,72 @@
 import { NextResponse } from "next/server"
-import type { Reservation, CreateReservationPayload } from "@/lib/types"
-import { reservations } from "@/lib/mock-store"
+import { ReservationStatus } from "@/lib/generated/prisma/client"
+import { serializeReservation } from "@/lib/api-serializers"
+import { prisma } from "@/lib/prisma"
+import { releaseExpiredReservations } from "@/lib/reservation-expiry"
+import type { CreateReservationPayload } from "@/lib/types"
+
+export const runtime = "nodejs"
+
+const reservationInclude = {
+  product: true,
+  warehouse: true,
+}
+
+function jsonError(error: string, message: string, status: number) {
+  return NextResponse.json({ error, message }, { status })
+}
 
 export async function POST(request: Request) {
-  const body = (await request.json()) as CreateReservationPayload
+  let body: CreateReservationPayload
+
+  try {
+    body = (await request.json()) as CreateReservationPayload
+  } catch {
+    return jsonError("INVALID_REQUEST_BODY", "Invalid request body", 400)
+  }
+
   const { productId, warehouseId, quantity } = body
 
-  if (!productId || !warehouseId || !quantity || quantity < 1) {
-    return NextResponse.json({ message: "Invalid request body." }, { status: 400 })
+  if (
+    typeof productId !== "string" ||
+    typeof warehouseId !== "string" ||
+    !Number.isInteger(quantity) ||
+    quantity <= 0
+  ) {
+    return jsonError("INVALID_REQUEST_BODY", "Invalid request body", 400)
   }
 
-  // Simulate insufficient stock for warehouseId "wh-3" + product "prod-1" combo as example
-  if (productId === "prod-1" && warehouseId === "wh-3") {
-    return NextResponse.json(
-      { message: "Not enough stock available in this warehouse." },
-      { status: 409 }
-    )
+  await releaseExpiredReservations()
+
+  const reservation = await prisma.$transaction(async (tx) => {
+    const updatedStockLevels = await tx.$queryRaw<{ id: string }[]>`
+      UPDATE "StockLevel"
+      SET "reservedUnits" = "reservedUnits" + ${quantity}
+      WHERE "productId" = ${productId}
+        AND "warehouseId" = ${warehouseId}
+        AND ("totalUnits" - "reservedUnits") >= ${quantity}
+      RETURNING "id"
+    `
+
+    if (updatedStockLevels.length === 0) {
+      return null
+    }
+
+    return tx.reservation.create({
+      data: {
+        productId,
+        warehouseId,
+        quantity,
+        status: ReservationStatus.PENDING,
+        expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+      },
+      include: reservationInclude,
+    })
+  })
+
+  if (!reservation) {
+    return jsonError("NOT_ENOUGH_STOCK", "Not enough stock available", 409)
   }
 
-  const id = `res-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-  const now = new Date()
-  const expiresAt = new Date(now.getTime() + 15 * 60 * 1000) // 15 minutes
-
-  // Placeholder - in production, look up product/warehouse names from DB.
-  const productNameMap: Record<string, string> = {
-    "prod-1": "Industrial Hydraulic Pump",
-    "prod-2": "Pneumatic Control Valve",
-    "prod-3": "Electric Motor 5HP",
-    "prod-4": "Stainless Steel Ball Valve",
-  }
-  const skuMap: Record<string, string> = {
-    "prod-1": "HYD-PUMP-001",
-    "prod-2": "PNEU-VALVE-200",
-    "prod-3": "ELEC-MOT-5HP",
-    "prod-4": "SS-BVALVE-75",
-  }
-  const warehouseNameMap: Record<string, string> = {
-    "wh-1": "Austin Central",
-    "wh-2": "Denver North",
-    "wh-3": "Seattle West",
-  }
-
-  const reservation: Reservation = {
-    id,
-    productId,
-    productName: productNameMap[productId] ?? "Unknown Product",
-    productSku: skuMap[productId] ?? "N/A",
-    warehouseId,
-    warehouseName: warehouseNameMap[warehouseId] ?? "Unknown Warehouse",
-    quantity,
-    status: "pending",
-    expiresAt: expiresAt.toISOString(),
-    createdAt: now.toISOString(),
-  }
-
-  reservations.set(id, reservation)
-
-  return NextResponse.json(reservation, { status: 201 })
+  return NextResponse.json(serializeReservation(reservation), { status: 201 })
 }
